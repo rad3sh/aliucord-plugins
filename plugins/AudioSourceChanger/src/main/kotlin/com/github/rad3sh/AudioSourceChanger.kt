@@ -102,7 +102,7 @@ class AudioSourceSelectorSheet : BottomSheet() {
         // UiKit.Settings.Item.Addition → ?attr/primary_300, @dimen/uikit_textsize_medium
         val descColor    = resolveAttrColor("primary_300")
         val descSizePx   = resolveDimenPx("uikit_textsize_medium")
-        // UiKit.TextAppearance (base of all UiKit.Settings.*) → ?attr/font_primary_normal (GG Sans Regular)
+        // UiKit.TextAppearance (base of all UiKit.Settings.*) → ?attr/font_primary_normal (Whitney Medium)
         val primaryNormalTypeface: Typeface? = run {
             val attrId = ctx.resources.getIdentifier("font_primary_normal", "attr", "com.discord")
             if (attrId == 0) return@run null
