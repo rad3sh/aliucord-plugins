@@ -6,11 +6,6 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.content.res.Configuration
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.RectF
-import android.graphics.drawable.BitmapDrawable
 import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
@@ -21,7 +16,6 @@ import com.aliucord.annotations.AliucordPlugin
 import com.aliucord.entities.Plugin
 import com.aliucord.patcher.Hook
 import com.aliucord.patcher.PreHook
-import com.aliucord.utils.DimenUtils
 import com.discord.utilities.color.ColorCompat
 import com.discord.widgets.voice.controls.VoiceControlsSheetView
 import com.discord.widgets.voice.fullscreen.WidgetCallFullscreen
@@ -145,6 +139,44 @@ class StreamLandscapeLock : Plugin() {
             lockBtn.visibility = if (isWatchingStream) View.VISIBLE else View.GONE
             if (isWatchingStream) {
                 updateButtonAppearance(lockBtn, landscapeLocked, sheetView.context)
+
+                // Count how many buttons are currently visible in the row (excluding ours).
+                // Only demote a button if we would otherwise exceed 4 visible top-row buttons.
+                // When the video/camera button is hidden there is already a free slot —
+                // in that case no demotion is needed.
+                val buttonsRow = lockBtn.parent as? ViewGroup ?: (stopWatchingBtn.parent as? ViewGroup)
+                var visibleTopCount = 0
+                if (buttonsRow != null) {
+                    for (i in 0 until buttonsRow.childCount) {
+                        val child = buttonsRow.getChildAt(i)
+                        if (child !== lockBtn && child.visibility == View.VISIBLE) visibleTopCount++
+                    }
+                }
+                logger.info("#$seq demotion check: visibleTopCount=$visibleTopCount")
+
+                if (visibleTopCount >= 4) {
+                    val res     = sheetView.context.resources
+                    val ssTopId = res.getIdentifier("screen_share_button",           "id", "com.discord")
+                    val ssSecId = res.getIdentifier("screen_share_secondary_button", "id", "com.discord")
+                    val aoTopId = res.getIdentifier("audio_output_container",        "id", "com.discord")
+                    val aoSecId = res.getIdentifier("audio_output_secondary_button", "id", "com.discord")
+                    val ssTop   = sheetView.findViewById<View>(ssTopId)
+                    val aoTop   = sheetView.findViewById<View>(aoTopId)
+                    when {
+                        ssTop?.visibility == View.VISIBLE -> {
+                            ssTop.visibility = View.GONE
+                            sheetView.findViewById<View>(ssSecId)?.visibility = View.VISIBLE
+                        }
+                        aoTop?.visibility == View.VISIBLE -> {
+                            aoTop.visibility = View.GONE
+                            sheetView.findViewById<View>(aoSecId)?.visibility = View.VISIBLE
+                        }
+                    }
+                    // Do NOT set secondary_actions_card visibility here.
+                    // handleSheetState() owns that: it shows the card when the sheet
+                    // expands and hides it when the sheet collapses (state == 4).
+                    // Forcing VISIBLE here would undo handleSheetState's INVISIBLE on collapse.
+                }
             }
         })
 
@@ -192,7 +224,6 @@ class StreamLandscapeLock : Plugin() {
 
         val btn = ImageButton(ctx).apply {
             tag = LOCK_BTN_TAG
-            setImageDrawable(createLandscapeIconDrawable(ctx))
             contentDescription = "Lock to landscape"
 
             // Clone the circular background from the stopWatchingButton so our
@@ -201,10 +232,15 @@ class StreamLandscapeLock : Plugin() {
                 ?.constantState?.newDrawable()?.mutate()
             background = bgDrawable
 
-            // Match the size of the existing button; add a small leading margin.
+            // Match size and margins of the existing button exactly.
             val sourceLp = stopWatchingBtn.layoutParams
             val lp = LinearLayout.LayoutParams(sourceLp.width, sourceLp.height)
-            lp.marginStart = DimenUtils.dpToPx(8)
+            if (sourceLp is ViewGroup.MarginLayoutParams) {
+                lp.leftMargin   = sourceLp.leftMargin
+                lp.rightMargin  = sourceLp.rightMargin
+                lp.topMargin    = sourceLp.topMargin
+                lp.bottomMargin = sourceLp.bottomMargin
+            }
             layoutParams = lp
 
             setOnClickListener {
@@ -242,34 +278,12 @@ class StreamLandscapeLock : Plugin() {
 
     // ── Appearance helpers ─────────────────────────────────────────────────────
 
-    /** Draws a landscape-screen + padlock icon using Canvas — no resource lookup needed. */
-    private fun createLandscapeIconDrawable(ctx: Context): BitmapDrawable {
-        val dp = DimenUtils.dpToPx(1).toFloat()
-        val size = DimenUtils.dpToPx(24)
-        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFFFFFFFF.toInt()
-        }
-
-        // Landscape screen frame (stroke rectangle)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 2f * dp
-        canvas.drawRoundRect(RectF(1f * dp, 5f * dp, 23f * dp, 19f * dp), 1.5f * dp, 1.5f * dp, paint)
-
-        // Lock body (filled rounded rect)
-        paint.style = Paint.Style.FILL
-        canvas.drawRoundRect(RectF(7.75f * dp, 11f * dp, 15.25f * dp, 16f * dp), 0.75f * dp, 0.75f * dp, paint)
-
-        // Lock shackle (top arc)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 1.5f * dp
-        canvas.drawArc(RectF(9f * dp, 8f * dp, 13f * dp, 12f * dp), 180f, 180f, false, paint)
-
-        return BitmapDrawable(ctx.resources, bmp)
-    }
-
     private fun updateButtonAppearance(btn: ImageButton, isActive: Boolean, ctx: Context) {
+        // Switch icon: fullscreen-enter (unlocked) ↔ fullscreen-exit (locked)
+        val iconName = if (isActive) "exo_ic_fullscreen_exit" else "exo_ic_fullscreen_enter"
+        val iconId = ctx.resources.getIdentifier(iconName, "drawable", "com.discord")
+        if (iconId != 0) btn.setImageDrawable(ctx.resources.getDrawable(iconId, ctx.theme))
+
         val res = ctx.resources
 
         val whiteId = res.getIdentifier("white", "color", "com.discord")
