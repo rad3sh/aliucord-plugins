@@ -22,14 +22,13 @@ import com.discord.widgets.voice.fullscreen.WidgetCallFullscreen
 import java.lang.reflect.Field
 
 @AliucordPlugin
-class StreamLandscapeLock : Plugin() {
+class FullscreenLock : Plugin() {
 
     private companion object {
-        const val LOCK_BTN_TAG = "stream_landscape_lock_btn"
+        const val LOCK_BTN_TAG = "fullscreen_lock_btn"
     }
 
     private var landscapeLocked = false
-    private var callCount = 0
 
     // Cached reflection fields — populated lazily on first call
     private var bindingField: Field? = null
@@ -88,26 +87,14 @@ class StreamLandscapeLock : Plugin() {
                 return@Hook
             }
 
-            val seq = ++callCount
             val isWatchingStream = stopWatchingBtn.visibility == View.VISIBLE
             val activity = findActivity(sheetView)
-
-            // Dump full state on every call
-            val reqOri = activity?.requestedOrientation ?: -999
             val cfgOri = activity?.resources?.configuration?.orientation ?: -999
-            val cfgOriName = when (cfgOri) {
-                Configuration.ORIENTATION_LANDSCAPE -> "LANDSCAPE"
-                Configuration.ORIENTATION_PORTRAIT  -> "PORTRAIT"
-                else -> "UNDEFINED($cfgOri)"
-            }
-            val isChanging = activity?.isChangingConfigurations ?: false
-            logger.info("#$seq configureUI: locked=$landscapeLocked  watching=$isWatchingStream  reqOri=$reqOri  cfgOri=$cfgOriName  isChangingConfigs=$isChanging  activity=${activity?.javaClass?.simpleName}")
 
             // Auto-restore orientation when stream focus is lost while locked
             if (!isWatchingStream && landscapeLocked) {
-                logger.info("#$seq configureUI: stream NOT visible & locked \u2192 restoring FULL_USER")
+                logger.info("configureUI: stream lost \u2192 restoring FULL_USER")
                 landscapeLocked = false
-                logger.info("#$seq configureUI: calling setRequestedOrientation(FULL_USER=13)")
                 activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
             }
 
@@ -116,13 +103,9 @@ class StreamLandscapeLock : Plugin() {
             // (manifest declares screenOrientation="fullUser" value=13, every new Activity
             // returns 13 which is != LANDSCAPE=0, causing infinite recreation if we use that).
             if (landscapeLocked && isWatchingStream && activity != null) {
-                val isLandscape = cfgOri == Configuration.ORIENTATION_LANDSCAPE
-                logger.info("#$seq configureUI: lock reassert check: isLandscape=$isLandscape (cfgOri=$cfgOriName)")
-                if (!isLandscape) {
-                    logger.info("#$seq configureUI: screen is portrait \u2192 calling setRequestedOrientation(SENSOR_LANDSCAPE=6)")
+                if (cfgOri != Configuration.ORIENTATION_LANDSCAPE) {
+                    logger.info("configureUI: portrait while locked \u2192 setRequestedOrientation(SENSOR_LANDSCAPE)")
                     activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                } else {
-                    logger.info("#$seq configureUI: already landscape, no setRequestedOrientation call")
                 }
             }
 
@@ -130,10 +113,8 @@ class StreamLandscapeLock : Plugin() {
             var lockBtn = sheetView.findViewWithTag<View?>(LOCK_BTN_TAG) as? ImageButton
 
             if (lockBtn == null) {
-                logger.info("#$seq configureUI: injecting lock button (isWatchingStream=$isWatchingStream)")
+                logger.info("configureUI: injecting lock button")
                 lockBtn = createLockButton(sheetView, stopWatchingBtn) ?: return@Hook
-            } else {
-                logger.info("#$seq configureUI: lock button already present, skipping injection")
             }
 
             lockBtn.visibility = if (isWatchingStream) View.VISIBLE else View.GONE
@@ -152,8 +133,6 @@ class StreamLandscapeLock : Plugin() {
                         if (child !== lockBtn && child.visibility == View.VISIBLE) visibleTopCount++
                     }
                 }
-                logger.info("#$seq demotion check: visibleTopCount=$visibleTopCount")
-
                 if (visibleTopCount >= 4) {
                     val res     = sheetView.context.resources
                     val ssTopId = res.getIdentifier("screen_share_button",           "id", "com.discord")
@@ -192,16 +171,10 @@ class StreamLandscapeLock : Plugin() {
                     logger.warn("onDestroy: activity is null  landscapeLocked=$landscapeLocked")
                     return@Hook
                 }
-                val changing = activity.isChangingConfigurations
-                val reqOri = activity.requestedOrientation
-                val cfgOri = activity.resources.configuration.orientation
-                logger.info("onDestroy: isChangingConfigurations=$changing  landscapeLocked=$landscapeLocked  reqOri=$reqOri  cfgOri=$cfgOri")
-                if (!changing) {
-                    logger.info("onDestroy: real exit \u2192 calling setRequestedOrientation(FULL_USER=13)")
+                if (!activity.isChangingConfigurations) {
+                    logger.info("onDestroy: real exit \u2192 restoring FULL_USER")
                     activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
                     landscapeLocked = false
-                } else {
-                    logger.info("onDestroy: config change recreation, preserving landscapeLocked=$landscapeLocked")
                 }
             }
         )
@@ -210,7 +183,6 @@ class StreamLandscapeLock : Plugin() {
     override fun stop(context: Context) {
         patcher.unpatchAll()
         landscapeLocked = false
-        callCount = 0
     }
 
     // ── Button creation ────────────────────────────────────────────────────────
@@ -252,9 +224,7 @@ class StreamLandscapeLock : Plugin() {
                 else
                     ActivityInfo.SCREEN_ORIENTATION_FULL_USER
                 val activity = findActivity(this)
-                val cfgOriClick = activity?.resources?.configuration?.orientation
-                logger.info("CLICK: landscapeLocked=$landscapeLocked  setting orientation=$orientation  cfgOri=$cfgOriClick  activity=${activity?.javaClass?.simpleName}")
-                logger.info("CLICK: calling setRequestedOrientation($orientation)")
+                logger.info("CLICK: locked=$landscapeLocked  orientation=$orientation")
                 updateButtonAppearance(this, landscapeLocked, ctx)
                 activity?.requestedOrientation = orientation
             }

@@ -13,6 +13,7 @@ Plugins for [Aliucord](https://github.com/Aliucord), a mod for old Discord Andro
 | Plugin               | Description                                                                                                                                                                        | Download                                                                                                                                                       |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `AudioSourceChanger` | Adds an **Audio source** option directly into Discord's Voice & Video settings UI, letting you control how your microphone is captured during calls. [↓ note](#audiosourcechanger) | [![Download](https://img.shields.io/badge/Download-.zip-blue?style=flat-square)](https://github.com/rad3sh/aliucord-plugins/raw/builds/AudioSourceChanger.zip) |
+| `FullscreenLock`     | Adds a **landscape lock** button to the voice call controls sheet while watching a stream, keeping the screen in landscape mode regardless of device rotation.                     | [![Download](https://img.shields.io/badge/Download-.zip-blue?style=flat-square)](https://github.com/rad3sh/aliucord-plugins/raw/builds/FullscreenLock.zip)     |
 
 ## Plugin Notes
 
