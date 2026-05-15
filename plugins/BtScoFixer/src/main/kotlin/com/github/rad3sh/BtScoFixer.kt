@@ -3,7 +3,6 @@ package com.github.rad3sh
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Typeface
-import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Bundle
@@ -195,12 +194,11 @@ class BtScoFixerSettingsSheet : BottomSheet() {
         addSectionTitle("Perfil ao detectar SCO")
 
         val storedProfile = pluginSettings.getString(PREF_PROFILE, "default")
-        val effectiveProfile = if (scoActive) storedProfile else "default"
 
         addItem(
             "Discord Default",
             "Comportamento padrão sem intervenção — SCO e roteamento normais do Android.",
-            effectiveProfile == "default",
+            storedProfile == "default"
         ) { pluginSettings.setString(PREF_PROFILE, "default") }
 
         addItem(
@@ -209,8 +207,7 @@ class BtScoFixerSettingsSheet : BottomSheet() {
                 "USAGE_MEDIA + SCO bloqueado + MODE_NORMAL — tenta rotear output pelo A2DP. ⚠ Mic BT pode parar."
             else
                 "Só disponível durante chamada SCO ativa. Inicie uma chamada com headset BT primeiro.",
-            effectiveProfile == "media_normal_nosco",
-            enabled = scoActive,
+            storedProfile == "media_normal_nosco"
         ) { pluginSettings.setString(PREF_PROFILE, "media_normal_nosco") }
     }
 }
@@ -218,6 +215,15 @@ class BtScoFixerSettingsSheet : BottomSheet() {
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 @AliucordPlugin
 class BtScoFixer : Plugin() {
+
+    // Utilitário para traduzir o valor int do modo de áudio para o nome simbólico
+    private fun modeName(mode: Int): String = when (mode) {
+        AudioManager.MODE_NORMAL -> "MODE_NORMAL"
+        AudioManager.MODE_RINGTONE -> "MODE_RINGTONE"
+        AudioManager.MODE_IN_CALL -> "MODE_IN_CALL"
+        AudioManager.MODE_IN_COMMUNICATION -> "MODE_IN_COMMUNICATION"
+        else -> "MODE_$mode"
+    }
 
     override fun start(context: Context) {
         BtScoFixerSettingsSheet.pluginSettings = settings
@@ -229,84 +235,29 @@ class BtScoFixer : Plugin() {
 
         settingsTab = SettingsTab(BtScoFixerSettingsSheet::class.java, SettingsTab.Type.BOTTOM_SHEET)
 
-        // ── Hook 1: startBluetoothSco — mark SCO active ──────────────────────────
-        // Discord calls this when a BT SCO headset is selected for the call.
-        // We detect it here and optionally block it if "media_normal_nosco" is selected.
-        patcher.patch(
-            AudioManager::class.java.getMethod("startBluetoothSco"),
-            PreHook { param ->
-                scoActive = true
-                val profile = settings.getString(PREF_PROFILE, "default")
-                if (profile == "media_normal_nosco") {
-                    param.result = null
-                    logger.info("[Hook1] startBluetoothSco → BLOCKED (profile=media_normal_nosco)")
-                } else {
-                    logger.info("[Hook1] startBluetoothSco → ALLOWED (profile=default)")
-                }
-            }
-        )
-
-        // ── Hook 2: stopBluetoothSco — mark SCO inactive ─────────────────────────
-        // SCO stopped = device disconnected or call ended → revert to default behavior.
-        patcher.patch(
-            AudioManager::class.java.getMethod("stopBluetoothSco"),
-            PreHook { param ->
-                scoActive = false
-                logger.info("[Hook2] stopBluetoothSco → scoActive=false, effective profile → default")
-            }
-        )
-
-        // ── Hook 3: WebRtcAudioTrack.initPlayout — override audioAttributes ──────
-        // Called per-call. If SCO is active and profile is media_normal_nosco,
-        // override audioAttributes to USAGE_MEDIA before AudioTrack is created.
-        val hook3Method = try {
+        // ── Hook 0: WebRtcAudioTrack.initPlayout — override audioAttributes per call ──
+        // createAudioDeviceModule() is called once at WebRTC engine startup (before the
+        // plugin loads), so hooking it misses all calls. initPlayout(int,int,double) is
+        // called per-call and uses this.audioAttributes to create the AudioTrack.
+        // We set the instance field right before AudioTrack creation so our usage applies.
+        val hook1Method = try {
             Class.forName("org.webrtc.audio.WebRtcAudioTrack")
                 .getDeclaredMethod("initPlayout", Int::class.java, Int::class.java, Double::class.java)
-                .also { it.isAccessible = true; logger.info("[Hook3] initPlayout found") }
+                .also { it.isAccessible = true; logger.info("[Hook0] initPlayout found — registering patch") }
         } catch (e: Throwable) {
-            logger.warn("[Hook3] initPlayout NOT found — hook skipped", e); null
+            logger.warn("[Hook0] initPlayout NOT found — hook skipped", e); null
         }
-        if (hook3Method != null) {
+        if (hook1Method != null) {
+            
             patcher.patch(
-                hook3Method,
+                hook1Method,
+                
                 PreHook { param ->
-                    val profile = settings.getString(PREF_PROFILE, "default")
-                    if (profile != "media_normal_nosco") {
-                        // Restore audioAttributes if the field was previously overridden to USAGE_MEDIA.
-                        // The WebRtcAudioTrack instance may be reused between calls, keeping the stale value.
-                        try {
-                            val field = hook3Method.declaringClass
-                                .getDeclaredField("audioAttributes")
-                                .also { it.isAccessible = true }
-                            val current = field.get(param.thisObject) as? AudioAttributes
-                            if (current != null && current.usage == AudioAttributes.USAGE_MEDIA) {
-                                val restored = AudioAttributes.Builder()
-                                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                    .build()
-                                field.set(param.thisObject, restored)
-                                logger.info("[Hook3] initPlayout — profile=default, restored audioAttributes → USAGE_VOICE_COMMUNICATION")
-                            } else {
-                                logger.info("[Hook3] initPlayout — profile=default, no restore needed")
-                            }
-                        } catch (e: Throwable) {
-                            logger.warn("[Hook3] initPlayout — failed to check/restore audioAttributes", e)
-                        }
-                        return@PreHook
-                    }
-                    // Dump all device types for diagnostics
-                    val allDevices = am.getDevices(AudioManager.GET_DEVICES_ALL)
-                    val deviceTypes = buildString {
-                        for (d in allDevices) append("${d.productName}(type=${d.type}) ")
-                    }
-                    logger.info("[Hook3] devices: $deviceTypes")
-                    // Verifica presença do dispositivo BT SCO diretamente — evita race com startBluetoothSco
-                    var hasSco = false
-                    for (d in allDevices) {
-                        if (d.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) { hasSco = true; break }
-                    }
-                    if (!hasSco) {
-                        logger.info("[Hook3] initPlayout — nenhum dispositivo SCO presente, no override")
+                    logger.info("[Hook0] initPlayout called (profile=${settings.getString(PREF_PROFILE, "default")}, scoActive=$scoActive)")
+                    /* 
+                    val usageMode = settings.getString(PREF_USAGE, "VOICE_COMM")
+                    if (usageMode == "VOICE_COMM") {
+                        logger.info("[Hook0] initPlayout — usage=VOICE_COMM (no override)")
                         return@PreHook
                     }
                     val attrs = AudioAttributes.Builder()
@@ -314,52 +265,116 @@ class BtScoFixer : Plugin() {
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                     try {
-                        hook3Method.declaringClass
+                        hook1Method.declaringClass
                             .getDeclaredField("audioAttributes")
                             .also { it.isAccessible = true }
                             .set(param.thisObject, attrs)
-                        logger.info("[Hook3] initPlayout → audioAttributes overridden to USAGE_MEDIA")
+                        logger.info("[Hook0] initPlayout — audioAttributes overridden → USAGE_MEDIA")
                     } catch (e: Throwable) {
-                        logger.warn("[Hook3] initPlayout — failed to set audioAttributes", e)
+                        logger.warn("[Hook0] initPlayout — failed to set audioAttributes field", e)
                     }
+                        */
                 }
+                    
             )
+                
         }
 
+        // ── Hook 1: startBluetoothSco — mark SCO active ──────────────────────────
+        // Block SCO only when profile=media_normal_nosco AND a TYPE_BLUETOOTH_SCO (type=7) device
+        // is connected (i.e. the Baseus headset). Other outputs pass through normally.
+        patcher.patch(
+            AudioManager::class.java.getMethod("startBluetoothSco"),
+            PreHook { param ->
+
+                val amInst = param.thisObject as AudioManager
+                val profile = settings.getString(PREF_PROFILE, "default")
+                logger.info("[Hook1] startBluetoothSco called (profile=$profile, mode=${modeName(amInst.mode)}, scoActive=$scoActive)")
+                scoActive = amInst.isBluetoothScoOn()
+                if (profile == "media_normal_nosco") {
+                    var hasBtSco = false
+                    for (d in am.getDevices(AudioManager.GET_DEVICES_ALL)) {
+                        if (d.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) { hasBtSco = true; break }
+                    }
+                    if (hasBtSco) {
+                        param.result = null
+                        // Discord calls setMode(IN_COMMUNICATION) ~40ms BEFORE startBluetoothSco,
+                        // so Hook4 misses it (scoActive was false). Force NORMAL retroativamente.
+                        amInst.setMode(AudioManager.MODE_NORMAL)
+                        logger.info("[Hook1] startBluetoothSco → BLOCKED (profile=$profile, mode=${modeName(amInst.mode)}, scoActive=$scoActive) TYPE_BLUETOOTH_SCO device detected")
+                    } else {
+                        logger.info("[Hook1] startBluetoothSco → ALLOWED (profile=$profile, mode=${modeName(amInst.mode)}, scoActive=$scoActive) no TYPE_BLUETOOTH_SCO device")
+                    }
+                } else {
+
+                /* TODO
+                if (Build.VERSION.SDK_INT >= 31) {
+                    // Android 12 ou superior: DEVE usar setCommunicationDevice() / clearCommunicationDevice()
+                    // Isso gerencia o áudio de chamadas modernos e fones HFP normais
+                } else {
+                    // Android 11 ou inferior: DEVE usar startBluetoothSco() / stopBluetoothSco()
+                }
+                */
+                // Perfil default: não bloqueia startBluetoothSco, mas marca scoActive=true para o caso de o usuário mudar para o perfil "media_normal_nosco" durante a chamada
+                logger.info("[Hook1] startBluetoothSco → ALLOWED (profile=$profile, mode=${modeName(amInst.mode)}, scoActive=$scoActive)")
+                }
+            }
+        )
+
+        // ── Hook 2: stopBluetoothSco — mark SCO inactive ────────────────────────────
+        patcher.patch(
+            AudioManager::class.java.getMethod("stopBluetoothSco"),
+            PreHook { param ->
+                val profile = settings.getString(PREF_PROFILE, "default")
+                logger.info("[Hook2] stopBluetoothSco called (profile=$profile, mode=${modeName((param.thisObject as AudioManager).mode)} , scoActive=$scoActive)")
+                val amInst = param.thisObject as AudioManager
+                amInst.setBluetoothScoOn(false) // chama o método original para garantir que o estado do Android seja atualizado (ex: isBluetoothScoOn = false
+                scoActive = amInst.isBluetoothScoOn() // atualiza nosso estado interno de scoActive
+                logger.info("[Hook2] stopBluetoothSco → (profile=$profile, mode=${modeName((param.thisObject as AudioManager).mode)}, scoActive=$scoActive)")
+
+                //TODO
+                /* 
+                if (Build.VERSION.SDK_INT >= 31) {
+                    amInst.clearCommunicationDevice()
+                    logger.info("[Hook2] clearCommunicationDevice() called (Android 12+) (profile=$profile, mode=${modeName((param.thisObject as AudioManager).mode)}, scoActive=$scoActive)")
+                    return@PreHook
+                } else {
+
+                }
+                */
+            }
+        )
+
         // ── Hook 4: AudioManager.setMode — force NORMAL ──────────────────────────
-        // When SCO is active and profile is media_normal_nosco, replace
-        // IN_COMMUNICATION(3) with NORMAL(0) to disable HW AEC and change routing.
+        // Guard on scoActive: Discord calls stopBluetoothSco() before switching to
+        // speakerphone/earpiece/wired, which sets scoActive=false — so the override
+        // is automatically skipped for those outputs without any extra device scanning.
         patcher.patch(
             AudioManager::class.java.getMethod("setMode", Int::class.java),
             PreHook { param ->
                 val profile = settings.getString(PREF_PROFILE, "default")
+                logger.info("[Hook4] setMode called (profile=$profile, mode=${modeName(param.args[0] as Int)} , scoActive=$scoActive)")
                 val original = param.args[0] as Int
-                if (profile != "media_normal_nosco") {
-                    logger.info("[Hook4] setMode: $original — profile=$profile, no override")
+
+                // Só aplica o override se:
+                // - Perfil ativo é "media_normal_nosco"
+                // - SCO está ativo (scoActive=true)
+                // - Discord está tentando setar MODE_IN_COMMUNICATION
+                if (profile != "media_normal_nosco" || !scoActive || original != AudioManager.MODE_IN_COMMUNICATION) {
+                    // EARPIECE, WIRED_HEADSET, SPEAKER_OUTPUT:
+                    // Discord chama stopBluetoothSco antes de trocar para esses outputs,
+                    // então scoActive=false e o override é ignorado (setMode(IN_COMMUNICATION) segue normal)
+                    logger.info("[Hook4] setMode=${modeName(original)} - Skip (profile=$profile, scoActive=$scoActive)")
                     return@PreHook
                 }
-                // Dump all device types for diagnostics
-                val amHook = param.thisObject as AudioManager
-                val allDevices = amHook.getDevices(AudioManager.GET_DEVICES_ALL)
-                val deviceTypes = buildString {
-                    for (d in allDevices) append("${d.productName}(type=${d.type}) ")
-                }
-                logger.info("[Hook4] setMode=$original devices: $deviceTypes")
-                // Verifica presença do dispositivo BT SCO diretamente — evita race com startBluetoothSco
-                var hasSco = false
-                for (d in allDevices) {
-                    if (d.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) { hasSco = true; break }
-                }
-                if (!hasSco) {
-                    logger.info("[Hook4] setMode: $original — nenhum dispositivo SCO, no override")
-                    return@PreHook
-                }
-                if (original == AudioManager.MODE_IN_COMMUNICATION) {
-                    param.args[0] = AudioManager.MODE_NORMAL
-                    logger.info("[Hook4] setMode: $original → ${AudioManager.MODE_NORMAL} (forced NORMAL)")
-                }
+
+                // BLUETOOTH_HEADSET:
+                // Override: força MODE_NORMAL para tentar rotear áudio via A2DP
+                param.args[0] = AudioManager.MODE_NORMAL
+                logger.info("[Hook4] setMode: mode=${modeName(original)} → NORMAL (profile=$profile, mode=${modeName(param.args[0] as Int)}, scoActive=$scoActive)")
             }
         )
+
     }
 
     override fun stop(context: Context) = patcher.unpatchAll()
